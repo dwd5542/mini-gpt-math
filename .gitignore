@@ -1,5 +1,20 @@
-﻿venv/
+﻿# 기존
 __pycache__/
 *.npy
 .cache/
 *.pyc
+
+# venv
+venv/
+
+# 원본/파생 데이터 (스크립트로 재현 가능)
+math_theorems.txt
+math_theorems_cleaned.txt
+math_theorems_final.txt
+encoded_data.pt
+
+# 학습된 가중치 (관습대로 코드로만 재현성 보장)
+gpt_model.pt
+
+# 탐색/테스트용 스크래치 파일
+test_wiki_api.py
