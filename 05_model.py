@@ -175,7 +175,6 @@ eval_interval=400
 eval_iters=50
 
 @torch.no_grad()
-
 def estimate_loss():
     out={}
     model.eval()
