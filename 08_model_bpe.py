@@ -275,5 +275,173 @@ generated_ids = generated[0].tolist()
 bpe_itos = {int(k): v for k, v in bpe_data["itos"].items()}
 
 print(decode_bpe(generated_ids, bpe_itos))
+
 # %%
-print("32000스텝 실행 최종 - train:", train_losses[-1], "val:", val_losses[-1])
+@torch.no_grad()
+def generate_top_k(model,idx,max_new_tokens,k):
+    for _ in range(max_new_tokens):
+        idx_cond=idx[:,-block_size:]
+        logits,_=model(idx_cond)
+        logits=logits[:,-1,:]
+
+        top_vals,top_idx=torch.topk(logits,k)
+        probs=F.softmax(top_vals,dim=-1)
+        sampled=torch.multinomial(probs,num_samples=1)
+        idx_next=top_idx.gather(-1,sampled)
+        idx=torch.cat((idx,idx_next),dim=1)
+    return idx
+
+@torch.no_grad()
+def generate_top_p(model,idx,max_new_tokens,p):
+    for _ in range(max_new_tokens):
+        idx_cond=idx[:,-block_size:]
+        logits,_=model(idx_cond)
+        logits=logits[:,-1,:]
+
+        probs=F.softmax(logits,dim=-1)
+        sorted_probs,sorted_idx=torch.sort(probs,descending=True, dim=-1)
+        cumulative_probs=torch.cumsum(sorted_probs,dim=-1)
+
+        cutoff=cumulative_probs>p
+        cutoff[...,1:]=cutoff[...,:-1].clone()
+        cutoff[...,0]=False
+        sorted_probs[cutoff]=0.0
+
+        sorted_probs=sorted_probs/sorted_probs.sum(dim=-1,keepdim=True)
+        sampled=torch.multinomial(sorted_probs,num_samples=1)
+        idx_next=sorted_idx.gather(-1,sampled)
+
+        idx=torch.cat((idx,idx_next),dim=1)
+    return idx
+
+start_word="The"
+start_tokens=tokenize_word(start_word, merges)
+start_ids=[bpe_stoi[tok] for tok in start_tokens]
+
+for name, fn in [
+    ("기존 (순수 multinomial)", lambda: generate(model, torch.tensor([start_ids]).to(device), 80)),
+    ("top-k=10", lambda: generate_top_k(model, torch.tensor([start_ids]).to(device), 80, k=10)),
+    ("top-p=0.9", lambda: generate_top_p(model, torch.tensor([start_ids]).to(device), 80, p=0.9)),
+]:
+    result=fn()
+    print(f"--- {name} ---")
+    print(decode_bpe(result[0].tolist(), bpe_itos))
+    print()
+# %%
+from collections import defaultdict
+
+with open("math_theorems_final.txt", "r", encoding="utf-8") as f:
+    corpus_text = f.read()
+
+word_freq = defaultdict(int)
+for word in corpus_text.split():
+    word_freq[word] += 1
+
+def measure_valid_word_ratio(generate_fn, name, word_freq, start_words, n_trials_per_word=5):
+    ratios = []
+    for start_word in start_words:
+        start_tokens = tokenize_word(start_word, merges)
+        start_ids = [bpe_stoi[tok] for tok in start_tokens]
+        for i in range(n_trials_per_word):
+            idx = torch.tensor([start_ids]).to(device)
+            result = generate_fn(idx)
+            decoded = decode_bpe(result[0].tolist(), bpe_itos)
+            words = decoded.split()
+            if len(words) == 0:
+                continue
+            valid = sum(1 for w in words if w.strip(".,;:()[]") in word_freq)
+            ratios.append(valid / len(words))
+            print(f"{name} {i} :",decoded)
+    ratios = torch.tensor(ratios)
+    return ratios.mean().item(), ratios.std().item()
+
+start_words = ["The", "Let", "If", "Suppose", "For"]
+
+results = {}
+results["기존"] = measure_valid_word_ratio(
+    lambda idx: generate(model, idx, 80),"기존", word_freq, start_words)
+results["top-k=10"] = measure_valid_word_ratio(
+    lambda idx: generate_top_k(model, idx, 80, k=10),"top-k=10", word_freq, start_words)
+results["top-p=0.9"] = measure_valid_word_ratio(
+    lambda idx: generate_top_p(model, idx, 80, p=0.9), "top-p=0.9", word_freq, start_words)
+
+for name, (mean, std) in results.items():
+    print(f"{name}: 평균 {mean:.4f}, 표준편차 {std:.4f}")
+# %%
+normal={}
+
+mean, std = measure_valid_word_ratio(
+    lambda idx: generate(model, idx, 80),
+    f"normal", word_freq, start_words
+)
+normal["normal"] = (mean, std)
+print(f"normal : 평균 {mean:.4f}, 표준편차 {std:.4f}")
+
+
+k_values = [5, 10, 20, 30]
+k_results = {}
+
+for k in k_values:
+    mean, std = measure_valid_word_ratio(
+        lambda idx, k=k: generate_top_k(model, idx, 80, k=k),
+        f"top-k={k}", word_freq, start_words
+    )
+    k_results[k] = (mean, std)
+    print(f"k={k}: 평균 {mean:.4f}, 표준편차 {std:.4f}")
+
+p_values = [0.7, 0.8, 0.9, 0.95]
+p_results = {}
+
+for p in p_values:
+    mean, std = measure_valid_word_ratio(
+        lambda idx, p=p: generate_top_p(model, idx, 80, p=p),
+        f"top-p={p}", word_freq, start_words
+    )
+    p_results[p] = (mean, std)
+    print(f"p={p}: 평균 {mean:.4f}, 표준편차 {std:.4f}")
+
+print(normal)
+print(k_results)
+print(p_results)
+
+# %%
+def measure_diversity(generate_fn,start_ids,n_trials=5):
+    texts=[]
+    for _ in range(n_trials):
+        idx=torch.tensor([start_ids]).to(device)
+        result=generate_fn(idx)
+        decoded=decode_bpe(result[0].tolist(),bpe_itos)
+        texts.append(set(decoded.split()))
+
+    distances=[]
+    for i in range(len(texts)):
+        for j in range(i+1,len(texts)):
+            union=texts[i]|texts[j]
+            intersection=texts[i]&texts[j]
+            jaccard_sim=len(intersection)/len(union) if union else 0
+            distances.append(1-jaccard_sim)
+
+    return torch.tensor(distances).mean().item()
+
+diversity_results = {}
+
+for k in [5, 10, 20, 30]:
+    div = measure_diversity(
+        lambda idx, k=k: generate_top_k(model, idx, 80, k=k),
+        start_ids, n_trials=5
+    )
+    diversity_results[f"top-k={k}"] = div
+    print(f"top-k={k}: 다양성 {div:.4f}")
+
+for p in [0.7, 0.8, 0.9, 0.95]:
+    div = measure_diversity(
+        lambda idx, p=p: generate_top_p(model, idx, 80, p=p),
+        start_ids, n_trials=5
+    )
+    diversity_results[f"top-p={p}"] = div
+    print(f"top-p={p}: 다양성 {div:.4f}")
+
+div_baseline = measure_diversity(lambda idx: generate(model, idx, 80), start_ids, n_trials=5)
+diversity_results["기존"] = div_baseline
+print(f"기존: 다양성 {div_baseline:.4f}")
+# %%
