@@ -103,7 +103,7 @@ class GPTModel(nn.Module):
         return logits,loss
     
 @torch.no_grad()
-def estimate_loss():
+def estimate_loss(model,train_data,val_data,block_size,eval_iters):
     out={}
     model.eval()
     for split,data in [("train",train_data),("val",val_data)]:
@@ -138,7 +138,7 @@ steps_logged = []
 
 for iter in range(max_iters):
     if iter % eval_interval == 0:
-        losses = estimate_loss()
+        losses = estimate_loss(model, train_data, val_data, block_size, eval_iters)
         train_losses.append(losses['train'].item())
         val_losses.append(losses['val'].item())
         steps_logged.append(iter)
@@ -150,7 +150,7 @@ for iter in range(max_iters):
     loss.backward()
     optimizer.step()
 
-final_eval=estimate_loss()
+final_eval= estimate_loss(model, train_data, val_data, block_size, eval_iters)
 print(f"=== 학습 완료: train {final_eval['train']:.4f}, val {final_eval['val']:.4f} ===")
 
 torch.save(model.state_dict(),"gpt_model_bpe.pt")
@@ -444,4 +444,182 @@ for p in [0.7, 0.8, 0.9, 0.95]:
 div_baseline = measure_diversity(lambda idx: generate(model, idx, 80), start_ids, n_trials=5)
 diversity_results["기존"] = div_baseline
 print(f"기존: 다양성 {div_baseline:.4f}")
+# %%
+def measure_diversity_repeated(generate_fn,start_words,n_trials=5,n_repeats=5):
+    all_diversities=[]
+    for start_word in start_words:
+        start_tokens=tokenize_word(start_word,merges)
+        start_ids=[bpe_stoi[tok] for tok in start_tokens]
+        for _ in range(n_repeats):
+            div=measure_diversity(generate_fn,start_ids,n_trials)
+            all_diversities.append(div)
+    return torch.tensor(all_diversities)
+
+diversity_results_repeated = {}
+
+div_baseline_samples = measure_diversity_repeated(
+    lambda idx: generate(model, idx, 80), start_words, n_trials=5, n_repeats=5
+)
+diversity_results_repeated["기존"] = div_baseline_samples
+
+for k in k_values:
+    samples = measure_diversity_repeated(
+        lambda idx, k=k: generate_top_k(model, idx, 80, k=k), start_words, n_trials=5, n_repeats=5
+    )
+    diversity_results_repeated[f"top-k={k}"] = samples
+
+for p in p_values:
+    samples = measure_diversity_repeated(
+        lambda idx, p=p: generate_top_p(model, idx, 80, p=p), start_words, n_trials=5, n_repeats=5
+    )
+    diversity_results_repeated[f"top-p={p}"] = samples
+
+for name, samples in diversity_results_repeated.items():
+    mean = samples.mean().item()
+    std = samples.std().item()
+    se = std / (len(samples) ** 0.5)
+    print(f"{name}: 평균 {mean:.4f}, SE {se:.4f} (n={len(samples)})")
+
+# %%
+import json
+
+checkpoints = [500, 1000, 2000]
+encoded_by_cp = {}
+
+for cp in checkpoints:
+    data_cp = torch.load(f"encoded_data_bpe_{cp}.pt")
+    n_cp = int(0.9 * len(data_cp))
+
+    with open(f"bpe_vocab_{cp}.json", "r", encoding="utf-8") as f:
+        bpe_data_cp = json.load(f)
+    vocab_size_cp = len(bpe_data_cp["stoi"])
+
+    encoded_by_cp[cp] = {
+        "vocab_size": vocab_size_cp,
+        "train_data": data_cp[:n_cp],
+        "val_data": data_cp[n_cp:],
+    }
+    print(f"[{cp}] vocab_size={vocab_size_cp}, train={len(encoded_by_cp[cp]['train_data'])}, val={len(encoded_by_cp[cp]['val_data'])}")
+
+# %%
+
+n_embd = 64
+n_head = 4
+n_layer = 6
+block_size = 32
+max_iters = 32000
+eval_interval = 400
+eval_iters = 50
+batch_size = 4
+
+all_results = {}
+
+
+for cp in checkpoints:
+    print(f"\n=== {cp} 병합 모델 학습 시작 ===")
+
+    train_data_cp = encoded_by_cp[cp]["train_data"]
+    val_data_cp = encoded_by_cp[cp]["val_data"]
+    vocab_size_cp = encoded_by_cp[cp]["vocab_size"]
+
+    model = GPTModel(vocab_size=vocab_size_cp, n_embd=n_embd, block_size=block_size, n_head=n_head, n_layer=n_layer)
+    model = model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+    train_losses, val_losses, steps_logged = [], [], []
+
+    for it in range(max_iters):
+        if it % eval_interval == 0:
+            losses = estimate_loss(model, train_data_cp, val_data_cp, block_size, eval_iters)
+            train_losses.append(losses['train'].item())
+            val_losses.append(losses['val'].item())
+            steps_logged.append(it)
+            print(f"  [{cp}] step {it}: train {losses['train']:.4f}, val {losses['val']:.4f}")
+
+        xb, yb = get_batch(train_data_cp, block_size, batch_size=batch_size)
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+    final_eval = estimate_loss(model, train_data_cp, val_data_cp, block_size, eval_iters)
+    print(f"=== [{cp}] 학습 완료: train {final_eval['train']:.4f}, val {final_eval['val']:.4f} ===")
+
+    torch.save(model.state_dict(), f"gpt_model_bpe_{cp}.pt")
+
+    all_results[cp] = {
+        "train_losses": train_losses,
+        "val_losses": val_losses,
+        "steps": steps_logged,
+        "final_train": final_eval['train'].item(),
+        "final_val": final_eval['val'].item(),
+        "vocab_size": vocab_size_cp,
+    }
+# %%
+compression_ratios = {500: 2.490, 1000: 2.946, 2000: 3.498}
+
+print(f"{'체크포인트':<12} {'토큰당 val loss':<18} {'압축률':<10} {'글자당 val loss':<15}")
+for cp in checkpoints:
+    r = all_results[cp]
+    char_loss = r['final_val'] / compression_ratios[cp]
+    print(f"{cp:<12} {r['final_val']:<18.4f} {compression_ratios[cp]:<10} {char_loss:<15.4f}")
+
+# %%
+n_repeats = 2
+all_results_repeated = {}
+
+for cp in checkpoints:
+    for rep in range(n_repeats):
+        print(f"\n=== {cp} 병합 모델, 반복 {rep+1}/{n_repeats} 학습 시작 ===")
+
+        train_data_cp = encoded_by_cp[cp]["train_data"]
+        val_data_cp = encoded_by_cp[cp]["val_data"]
+        vocab_size_cp = encoded_by_cp[cp]["vocab_size"]
+
+        model = GPTModel(vocab_size=vocab_size_cp, n_embd=n_embd, block_size=block_size, n_head=n_head, n_layer=n_layer)
+        model = model.to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+        for it in range(max_iters):
+            if it % eval_interval == 0:
+                losses = estimate_loss(model, train_data_cp, val_data_cp, block_size, eval_iters)
+                if it % 4000 == 0:
+                    print(f"  [{cp}-{rep}] step {it}: train {losses['train']:.4f}, val {losses['val']:.4f}")
+
+            xb, yb = get_batch(train_data_cp, block_size, batch_size=batch_size)
+            logits, loss = model(xb, yb)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+
+        final_eval = estimate_loss(model, train_data_cp, val_data_cp, block_size, eval_iters)
+        print(f"=== [{cp}-{rep}] 완료: train {final_eval['train']:.4f}, val {final_eval['val']:.4f} ===")
+
+        all_results_repeated[(cp, rep)] = {
+            "final_train": final_eval['train'].item(),
+            "final_val": final_eval['val'].item(),
+        }
+# %%
+compression_ratios = {500: 2.490, 1000: 2.946, 2000: 3.498}
+
+print(f"{'체크포인트':<12} {'토큰당 val loss':<18} {'압축률':<10} {'글자당 val loss':<15}")
+for cp in checkpoints:
+    for rep in range(n_repeats):
+        r = all_results_repeated[(cp,rep)]
+        char_loss = r['final_val'] / compression_ratios[cp]
+        print(f"{cp:<12} {r['final_val']:<18.4f} {compression_ratios[cp]:<10} {char_loss:<15.4f}")
+
+# %%
+import torch
+
+grouped = {500: [1.3518, 1.3488], 1000: [1.3354, 1.3092], 2000: [1.2805, 1.2915]}
+
+stats = {}
+for cp, vals in grouped.items():
+    t = torch.tensor(vals)
+    mean = t.mean().item()
+    std = t.std().item()
+    se = std / (len(vals) ** 0.5)
+    stats[cp] = (mean, se)
+    print(f"{cp}: 평균 {mean:.4f}, SE {se:.4f}")
 # %%

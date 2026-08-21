@@ -61,7 +61,10 @@ def get_vocab_size(vocab):
 # print("병합 후 가장 흔한 단어 5개:", sorted(vocab.items(), key=lambda x: -x[1])[:5])
 
 # %%
-num_merges=500
+checkpoints=[500,1000,2000]
+num_merges=max(checkpoints)
+
+vocab_snapshot={}
 merges=[]
 
 for i in range(num_merges):
@@ -74,12 +77,28 @@ for i in range(num_merges):
     vocab=merge_vocab(best_pair,vocab)
     merges.append(best_pair)
 
-    if i%50==0:
-        print(f"{i}번째 병합: {best_pair}")
+    if (i+1) in checkpoints:
+        vocab_size,tokens_at_cp=get_vocab_size(vocab)
+        vocab_snapshot[i+1]=(vocab_size,list(merges),tokens_at_cp)
+        print(f"[{i+1}번 병합 지점] vocab_size = {vocab_size}")
+
+    if i%100==0:
+        print(f"{i}번째 병합 진행 중: {best_pair}")
 
 print("총 병합 횟수:", len(merges))
 final_size, final_tokens = get_vocab_size(vocab)
 print("최종 vocab_size:", final_size)
+
+# %%
+
+for cp in checkpoints:
+    vocab_size_cp,merges_cp,tokens_cp=vocab_snapshot[cp]
+
+    bpe_vocab_cp=sorted(tokens_cp)
+    bpe_stoi_cp={tok:i for i,tok in enumerate(bpe_vocab_cp)}
+    bpe_itos_cp={i:tok for i,tok in enumerate(bpe_vocab_cp)}
+
+    print(f"[{cp}] 조립된 vocab_size: {len(bpe_vocab_cp)} (저장된 값: {vocab_size_cp})")
 
 # initial_chars = set()
 # for word in word_freq:
@@ -132,31 +151,49 @@ def encode_bpe(text,merges,stoi,unk_token='▯'):
                 ids.append(stoi.get(unk_token,-1))
     return ids
 
-test_text="theory mathematics xyzzyplugh"
-ids = encode_bpe(test_text, merges, bpe_stoi)
-print("정수 인코딩 결과:", ids)
-print("길이:", len(ids))
+# test_text="theory mathematics xyzzyplugh"
+# ids = encode_bpe(test_text, merges, bpe_stoi)
+# print("정수 인코딩 결과:", ids)
+# print("길이:", len(ids))
 
-decoded_tokens = [bpe_itos[i] for i in ids]
-print("다시 디코딩한 토큰들:", decoded_tokens)
+# decoded_tokens = [bpe_itos[i] for i in ids]
+# print("다시 디코딩한 토큰들:", decoded_tokens)
 
 # %%
 import json 
 
-merges_serializable=[list(pair) for pair in merges]
+# merges_serializable=[list(pair) for pair in merges]
 
-bpe_data={
-    "merges": merges_serializable,
-    "stoi": bpe_stoi,
-    "itos": {str(k):v for k,v in bpe_itos.items()}
-}
+# bpe_data={
+#     "merges": merges_serializable,
+#     "stoi": bpe_stoi,
+#     "itos": {str(k):v for k,v in bpe_itos.items()}
+# }
 
-with open("bpe_vocab.json", "w", encoding="utf-8") as f:
-    json.dump(bpe_data, f, ensure_ascii=False, indent=2)
+# with open("bpe_vocab.json", "w", encoding="utf-8") as f:
+#     json.dump(bpe_data, f, ensure_ascii=False, indent=2)
 
-print("BPE vocab 저장 완료 → bpe_vocab.json")
-print("vocab_size:", len(bpe_stoi))
+# print("BPE vocab 저장 완료 → bpe_vocab.json")
+# print("vocab_size:", len(bpe_stoi))
 
+for cp in checkpoints:
+    vocab_size_cp, merges_cp, tokens_cp = vocab_snapshot[cp]
+
+    bpe_vocab_cp = sorted(tokens_cp)
+    bpe_stoi_cp = {tok: i for i, tok in enumerate(bpe_vocab_cp)}
+    bpe_itos_cp = {i: tok for i, tok in enumerate(bpe_vocab_cp)}
+
+    bpe_data_cp = {
+        "merges": [list(pair) for pair in merges_cp],
+        "stoi": bpe_stoi_cp,
+        "itos": {str(k): v for k, v in bpe_itos_cp.items()}
+    }
+
+    filename = f"bpe_vocab_{cp}.json"
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(bpe_data_cp, f, ensure_ascii=False, indent=2)
+
+    print(f"저장 완료 → {filename} (vocab_size={len(bpe_vocab_cp)})")
 # %%
 
 global_cache = {}
@@ -178,18 +215,52 @@ def encode_bpe_corpus(text, merges, stoi, cache, unk_token="▯"):
 with open("math_theorems_final.txt","r",encoding="utf-8") as f:
     full_text=f.read()
 
-all_ids=encode_bpe_corpus(full_text,merges,bpe_stoi,global_cache)
-print("전체 토큰 개수:", len(all_ids))
+# all_ids=encode_bpe_corpus(full_text,merges,bpe_stoi,global_cache)
+# print("전체 토큰 개수:", len(all_ids))
 
 import torch
-data=torch.tensor(all_ids,dtype=torch.long)
+# data=torch.tensor(all_ids,dtype=torch.long)
 
-n=int(0.9*len(data))
-train_data=data[:n]
-val_data=data[n:]
+# n=int(0.9*len(data))
+# train_data=data[:n]
+# val_data=data[n:]
 
-torch.save(data,"encoded_data_bpe.pt")
-print("train_data length:", len(train_data))
-print("val_data length:", len(val_data))
+# torch.save(data,"encoded_data_bpe.pt")
+# print("train_data length:", len(train_data))
+# print("val_data length:", len(val_data))
 
+# %%
+full_text_len = len(full_text)
+
+for cp in checkpoints:
+    vocab_size_cp, merges_cp, tokens_cp = vocab_snapshot[cp]
+    bpe_stoi_cp = {tok: i for i, tok in enumerate(sorted(tokens_cp))}
+
+    cache_cp = {}
+    ids_cp = encode_bpe_corpus(full_text, merges_cp, bpe_stoi_cp, cache_cp)
+
+    compression_ratio = full_text_len / len(ids_cp)
+    print(f"[{cp}] vocab_size={vocab_size_cp}, 토큰 수={len(ids_cp)}, 압축률(글자/토큰)={compression_ratio:.3f}")
+
+# %%
+encoded_by_cp = {}
+
+for cp in checkpoints:
+    vocab_size_cp, merges_cp, tokens_cp = vocab_snapshot[cp]
+    bpe_stoi_cp = {tok: i for i, tok in enumerate(sorted(tokens_cp))}
+
+    cache_cp = {}
+    ids_cp = encode_bpe_corpus(full_text, merges_cp, bpe_stoi_cp, cache_cp)
+
+    data_cp = torch.tensor(ids_cp, dtype=torch.long)
+    n_cp = int(0.9 * len(data_cp))
+
+    encoded_by_cp[cp] = {
+        "vocab_size": vocab_size_cp,
+        "train_data": data_cp[:n_cp],
+        "val_data": data_cp[n_cp:],
+    }
+
+    torch.save(data_cp, f"encoded_data_bpe_{cp}.pt")
+    print(f"[{cp}] train={len(encoded_by_cp[cp]['train_data'])}, val={len(encoded_by_cp[cp]['val_data'])}, 저장 → encoded_data_bpe_{cp}.pt")
 # %%
