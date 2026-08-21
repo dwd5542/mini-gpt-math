@@ -21,6 +21,7 @@ gpt_model_bpe.pt
 # 탐색/테스트용 스크래치 파일
 test_wiki_api.py
 
+bpe_vocab.json
 bpe_vocab_*.json
 encoded_data_bpe_*.pt
 gpt_model_bpe_*.pt

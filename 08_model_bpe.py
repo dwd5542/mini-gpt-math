@@ -3,7 +3,7 @@ import torch
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-data=torch.load("encoded_data_bpe.pt")
+data=torch.load("encoded_data_bpe_500.pt")
 
 n=int(0.9*len(data))
 train_data=data[:n]
@@ -183,7 +183,7 @@ chars_per_token_val = len(val_text) / len(val_data)
 print("val 기준 글자/토큰 비율:", chars_per_token_val)
 import json
 
-with open("bpe_vocab.json", "r", encoding="utf-8") as f:
+with open("bpe_vocab_500.json", "r", encoding="utf-8") as f:
     bpe_data = json.load(f)
 
 merges = [tuple(pair) for pair in bpe_data["merges"]]
@@ -622,4 +622,5 @@ for cp, vals in grouped.items():
     se = std / (len(vals) ** 0.5)
     stats[cp] = (mean, se)
     print(f"{cp}: 평균 {mean:.4f}, SE {se:.4f}")
+
 # %%
