@@ -624,3 +624,84 @@ for cp, vals in grouped.items():
     print(f"{cp}: 평균 {mean:.4f}, SE {se:.4f}")
 
 # %%
+n_head_values = [2, 4, 8, 16]
+n_repeats = 2
+
+n_embd = 64
+n_layer = 6
+block_size = 32
+max_iters = 32000
+eval_interval = 400
+eval_iters = 50
+batch_size = 4
+vocab_size = 787
+
+n_head_results = {}
+
+for nh in n_head_values:
+    for rep in range(n_repeats):
+        print(f"\n=== n_head={nh}, 반복 {rep+1}/{n_repeats} 학습 시작 ===")
+
+        model = GPTModel(vocab_size=vocab_size, n_embd=n_embd, block_size=block_size, n_head=nh, n_layer=n_layer)
+        model = model.to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+        for it in range(max_iters):
+            if it % eval_interval == 0 and it % 4000 == 0:
+                losses = estimate_loss(model, train_data, val_data, block_size, eval_iters)
+                print(f"  [n_head={nh}-{rep}] step {it}: train {losses['train']:.4f}, val {losses['val']:.4f}")
+
+            xb, yb = get_batch(train_data, block_size, batch_size=batch_size)
+            logits, loss = model(xb, yb)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+
+        final_eval = estimate_loss(model, train_data, val_data, block_size, eval_iters)
+        print(f"=== [n_head={nh}-{rep}] 완료: train {final_eval['train']:.4f}, val {final_eval['val']:.4f} ===")
+
+        n_head_results[(nh, rep)] = {
+            "final_train": final_eval['train'].item(),
+            "final_val": final_eval['val'].item(),
+        }
+# %%
+for nh in n_head_values:
+    for rep in range(2, 4):
+        print(f"\n=== n_head={nh}, 반복 {rep+1}/4 학습 시작 ===")
+
+        model = GPTModel(vocab_size=vocab_size, n_embd=n_embd, block_size=block_size, n_head=nh, n_layer=n_layer)
+        model = model.to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+        for it in range(max_iters):
+            xb, yb = get_batch(train_data, block_size, batch_size=batch_size)
+            logits, loss = model(xb, yb)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+
+        final_eval = estimate_loss(model, train_data, val_data, block_size, eval_iters)
+        print(f"=== [n_head={nh}-{rep}] 완료: train {final_eval['train']:.4f}, val {final_eval['val']:.4f} ===")
+
+        n_head_results[(nh, rep)] = {
+            "final_train": final_eval['train'].item(),
+            "final_val": final_eval['val'].item(),
+        }
+
+# %%
+print(n_head_results)
+
+import torch
+
+n_head_values = [2, 4, 8, 16]
+grouped = {nh: [n_head_results[(nh, r)]['final_val'] for r in range(4)] for nh in n_head_values}
+
+stats = {}
+for nh, vals in grouped.items():
+    t = torch.tensor(vals)
+    mean = t.mean().item()
+    std = t.std().item()
+    se = std / (len(vals) ** 0.5)
+    stats[nh] = (mean, se)
+    print(f"n_head={nh}: 평균 {mean:.4f}, SE {se:.4f}")
+# %%
